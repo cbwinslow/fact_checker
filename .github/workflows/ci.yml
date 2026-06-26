@@ -1,10 +1,9 @@
 name: CI
 
+# Disabled: GitHub Actions account locked due to billing.
+# Change trigger back to push/pull_request once billing is resolved.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
