@@ -1,15 +1,28 @@
-"""Centralised settings loaded from environment / .env file."""
+"""Centralised settings loaded from environment / .env file.
+
+When OPENROUTER_API_KEY is empty/unset (e.g. during local dev before the key
+refreshes) build_chat_model() returns a MockChatModel that responds with
+realistic stub JSON so the full pipeline can be exercised without hitting any
+external API.
+"""
 from __future__ import annotations
 
+import json
+import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Iterator, List, Literal, Optional
 
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.language_models.chat_models import BaseChatModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+log = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
-# Per-task model registry — all free-tier models on OpenRouter
+# Per-task model registry - all free-tier models on OpenRouter
 # ---------------------------------------------------------------------------
 TaskType = Literal[
     "extraction",
@@ -21,15 +34,15 @@ TaskType = Literal[
 ]
 
 MODEL_REGISTRY: dict[str, str] = {
-    # Structured claim extraction — best function calling + JSON output
+    # Structured claim extraction - best function calling + JSON output
     "extraction":    "openai/gpt-oss-120b:free",
-    # Deep fact verification — 1M ctx, built for research & multi-step reasoning
+    # Deep fact verification - 1M ctx, built for research & multi-step reasoning
     "verification":  "nvidia/nemotron-3-ultra-253b:free",
-    # Pipeline orchestration — agent coherence & long-term planning
+    # Pipeline orchestration - agent coherence & long-term planning
     "orchestration": "nvidia/nemotron-3-super-49b-v1:free",
-    # Video / audio / image ingestion — only free model accepting AV input
+    # Video / audio / image ingestion - only free model accepting AV input
     "multimodal":    "nvidia/llama-3.1-nemotron-nano-8b-v1:free",
-    # Tool use, structured DB writes, JSON schema output — lowest latency
+    # Tool use, structured DB writes, JSON schema output - lowest latency
     "tooluse":       "cohere/north-mini-code:free",
     # Quick low-cost subtasks (title gen, short summaries, routing)
     "fast":          "openai/gpt-oss-20b:free",
@@ -44,11 +57,11 @@ class Settings(BaseSettings):
     )
 
     # OpenRouter
-    openrouter_api_key:  str = ""
-    openrouter_model:    str = "openai/gpt-oss-120b:free"  # fallback default
+    openrouter_api_key: str = ""
+    openrouter_model: str = "openai/gpt-oss-120b:free"  # fallback default
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
-    # Per-task model overrides (optional — set in .env to swap a stage)
+    # Per-task model overrides (optional - set in .env to swap a stage)
     model_extraction:    Optional[str] = None
     model_verification:  Optional[str] = None
     model_orchestration: Optional[str] = None
@@ -60,14 +73,14 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://fact_checker:password@localhost:5432/fact_checker"
 
     # Whisper ASR
-    whisper_model_size:   str = "base"
-    whisper_device:       str = "cpu"
-    whisper_compute_type: str = "int8"
+    whisper_model_size:    str = "base"
+    whisper_device:        str = "cpu"
+    whisper_compute_type:  str = "int8"
 
     # App
-    log_level:       str  = "INFO"
-    artifact_dir:    Path = Path("./artifacts")
-    media_cache_dir: Path = Path("./media_cache")
+    log_level:        str = "INFO"
+    artifact_dir:     Path = Path("./artifacts")
+    media_cache_dir:  Path = Path("./media_cache")
 
     # FastAPI
     api_host: str = "0.0.0.0"
@@ -87,19 +100,101 @@ def get_settings() -> Settings:
 settings = get_settings()
 
 
+# ---------------------------------------------------------------------------
+# Mock LLM - used when OPENROUTER_API_KEY is unset
+# ---------------------------------------------------------------------------
+
+_MOCK_RESPONSES: dict[str, str] = {
+    "extraction": json.dumps([
+        {
+            "text": "[MOCK] The Earth is flat.",
+            "is_checkable": True,
+            "confidence": 0.95,
+            "context": "Mock claim for offline development",
+        },
+        {
+            "text": "[MOCK] Vaccines cause autism.",
+            "is_checkable": True,
+            "confidence": 0.90,
+            "context": "Mock claim for offline development",
+        },
+    ]),
+    "verification": json.dumps({
+        "verdict": "refuted",
+        "confidence": 0.95,
+        "explanation": "[MOCK] This claim is well-refuted by scientific consensus. "
+                        "Running in offline/mock mode - no real verification performed.",
+        "requires_human_review": False,
+    }),
+    "default": json.dumps({"result": "[MOCK] No API key set - running in offline mode."}),
+}
+
+
+class MockChatModel(BaseChatModel):
+    """Drop-in ChatModel stub for offline / no-API-key development.
+
+    Returns deterministic JSON responses shaped to match what each
+    pipeline agent expects, so the full pipeline can run end-to-end
+    without any external API calls.
+    """
+
+    task: str = "default"
+
+    @property
+    def _llm_type(self) -> str:
+        return "mock"
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        content = _MOCK_RESPONSES.get(self.task, _MOCK_RESPONSES["default"])
+        msg = AIMessage(content=content)
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+    async def _agenerate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        return self._generate(messages, stop, run_manager, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
 def build_chat_model(
     task: TaskType = "extraction",
     temperature: float = 0,
     max_tokens: Optional[int] = None,
-) -> ChatOpenAI:
-    """Return a ChatOpenAI client pre-configured for the given pipeline task.
+) -> BaseChatModel:
+    """Return a chat model pre-configured for the given pipeline task.
 
     Resolution order for the model ID:
       1. Per-task env override  (e.g. MODEL_EXTRACTION=...)
       2. MODEL_REGISTRY default for the task
       3. settings.openrouter_model global fallback
+
+    If OPENROUTER_API_KEY is empty/unset, returns a MockChatModel
+    that produces realistic stub responses so the pipeline can run
+    fully offline (useful during local dev / CI with no key).
     """
     s = get_settings()
+
+    if not s.openrouter_api_key.strip():
+        log.warning(
+            "[config] OPENROUTER_API_KEY not set - using MockChatModel for task '%s'. "
+            "Pipeline will run with stub responses.",
+            task,
+        )
+        return MockChatModel(task=task)
+
     override = getattr(s, f"model_{task}", None)
     model_id = override or MODEL_REGISTRY.get(task, s.openrouter_model)
 
@@ -111,5 +206,4 @@ def build_chat_model(
     )
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
-
     return ChatOpenAI(**kwargs)
