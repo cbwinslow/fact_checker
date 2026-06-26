@@ -7,7 +7,7 @@ from pathlib import Path
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ..config import settings
+from ..config import build_chat_model
 from ..models import Claim, EvidenceItem, Verdict, VerdictResult
 
 log = logging.getLogger(__name__)
@@ -22,77 +22,72 @@ def _load_prompt() -> str:
 
 
 def _build_llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        model=settings.openrouter_model,
-        openai_api_key=settings.openrouter_api_key,
-        openai_api_base=settings.openrouter_base_url,
-        temperature=0.0,
-        max_tokens=2048,
-    )
-
-
-def _evidence_for_claim(claim: Claim, evidence: list[EvidenceItem]) -> list[EvidenceItem]:
-    return [e for e in evidence if e.claim_id == claim.id]
+    """Use verification task slot -> nvidia/nemotron-3-ultra:free for deep reasoning."""
+    return build_chat_model(task="verification", temperature=0.0, max_tokens=2048)
 
 
 async def draft_verdicts(
     claims: list[Claim],
     evidence: list[EvidenceItem],
 ) -> list[VerdictResult]:
-    """For each claim, build a verdict using LLM + evidence snippets."""
+    """Generate a verdict for each claim grounded in retrieved evidence."""
+    if not claims:
+        return []
+
     llm = _build_llm()
     system_prompt = _load_prompt()
-    results: list[VerdictResult] = []
+    evidence_by_claim: dict = {}
+    for ev in evidence:
+        evidence_by_claim.setdefault(str(ev.claim_id), []).append(ev)
 
+    verdicts: list[VerdictResult] = []
     for claim in claims:
-        if not claim.is_checkable:
-            continue
-        claim_evidence = _evidence_for_claim(claim, evidence)
-        evidence_block = "\n".join(
-            f"- [{e.title or 'Source'}] {e.snippet} ({e.source_url})"
-            for e in claim_evidence[:6]
+        ev_items = evidence_by_claim.get(str(claim.id), [])
+        evidence_text = "\n".join(
+            f"- [{ev.title or 'Source'}]({ev.source_url}): {ev.snippet}"
+            for ev in ev_items
         ) or "No evidence retrieved."
 
-        user_msg = (
-            f"CLAIM: {claim.text}\n\n"
-            f"CONTEXT: {claim.context or 'N/A'}\n\n"
-            f"EVIDENCE:\n{evidence_block}\n\n"
-            "Return a JSON object with keys: verdict, explanation, confidence (0-1), requires_human_review."
-        )
-        messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
-        log.info("[VerdictAgent] Verdicting: %s", claim.text[:80])
-        response = await llm.ainvoke(messages)
-        raw = response.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(
+                content=(
+                    f"CLAIM:\n{claim.text}\n\n"
+                    f"EVIDENCE:\n{evidence_text}"
+                )
+            ),
+        ]
 
         try:
-            data = json.loads(raw)
-            verdict_str = data.get("verdict", "insufficient_evidence").lower().replace(" ", "_")
-            try:
-                verdict = Verdict(verdict_str)
-            except ValueError:
-                verdict = Verdict.INSUFFICIENT
-            confidence = float(data.get("confidence", 0.5))
-            requires_review = data.get("requires_human_review", confidence < LOW_CONFIDENCE_THRESHOLD)
-            result = VerdictResult(
-                claim_id=claim.id,
-                verdict=verdict,
-                explanation=data.get("explanation", ""),
-                confidence=confidence,
-                evidence_ids=[e.id for e in claim_evidence],
-                requires_human_review=bool(requires_review),
+            response = llm.invoke(messages)
+            data: dict = json.loads(response.content)
+            verdict_label = Verdict(data.get("verdict", "unverifiable"))
+            confidence = float(data.get("confidence", 0.0))
+            verdicts.append(
+                VerdictResult(
+                    claim_id=claim.id,
+                    verdict=verdict_label,
+                    explanation=data.get("explanation", ""),
+                    confidence=confidence,
+                    evidence_ids=[ev.id for ev in ev_items],
+                    requires_human_review=(
+                        data.get("requires_human_review", False)
+                        or confidence < LOW_CONFIDENCE_THRESHOLD
+                    ),
+                )
             )
-        except (json.JSONDecodeError, KeyError) as e:
-            log.warning("[VerdictAgent] Parse error: %s | raw=%s", e, raw[:200])
-            result = VerdictResult(
-                claim_id=claim.id,
-                verdict=Verdict.INSUFFICIENT,
-                explanation="Failed to parse model output.",
-                confidence=0.0,
-                requires_human_review=True,
+        except Exception as exc:
+            log.error("[verdict_agent] Failed to draft verdict for claim %s: %s", claim.id, exc)
+            verdicts.append(
+                VerdictResult(
+                    claim_id=claim.id,
+                    verdict=Verdict.UNVERIFIABLE,
+                    explanation="Verdict generation failed due to an internal error.",
+                    confidence=0.0,
+                    evidence_ids=[],
+                    requires_human_review=True,
+                )
             )
-        results.append(result)
 
-    log.info("[VerdictAgent] Generated %d verdicts", len(results))
-    return results
+    log.info("[verdict_agent] Drafted %d verdicts", len(verdicts))
+    return verdicts
