@@ -89,12 +89,28 @@ async def submit(
     local_path = Path(request.local_path) if request.local_path else None
 
     async def _run_and_persist() -> None:
+        """Background task: run pipeline with live DB status updates."""
         async with AsyncSessionLocal() as session:
+            # --- Pre-create the job row so status polling works immediately ---
+            from .db import VideoJobRow
+            from datetime import datetime
+            session.add(VideoJobRow(
+                id=job_id,
+                url=request.url,
+                local_path=str(local_path) if local_path else None,
+                status=JobStatus.PENDING.value,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            ))
+            await session.flush()
+
             try:
+                # Pass session so harness can write intermediate status updates
                 result = await run_pipeline(
                     url=request.url,
                     local_path=local_path,
                     job_id=job_id,
+                    session=session,
                 )
                 await save_pipeline_result(session, result)
                 await session.commit()
@@ -120,7 +136,7 @@ async def get_job(
     row = await get_job_row(session, job_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    # NOTE: VideoJobRow uses .id and .error (not .job_id / .error_message)
+    # VideoJobRow uses .id and .error (not .job_id / .error_message)
     return JobStatusResponse(
         job_id=str(row.id),
         status=row.status,
