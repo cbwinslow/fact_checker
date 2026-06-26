@@ -1,21 +1,27 @@
 """FastAPI layer for fact_checker.
 
 Endpoints:
-  POST /submit          - Submit URL or file path for fact-checking
-  GET  /jobs/{job_id}  - Get job result by ID (in-memory cache for now)
-  GET  /health         - Health check
+  POST /submit              - Submit URL or file path for async fact-checking
+  GET  /jobs/{job_id}       - Get job result by ID from database
+  GET  /health              - Health check
 """
 from __future__ import annotations
+
+import logging
 from pathlib import Path
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from .db import AsyncSessionLocal, get_session, init_db, save_pipeline_result, get_job_row
 from .harness import run_pipeline
-from .models import PipelineResult
+from .models import JobStatus
+
+log = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Fact Checker API",
@@ -30,19 +36,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory result cache (swap for DB in production)
-_results: dict[str, PipelineResult] = {}
 
+@app.on_event("startup")
+async def on_startup() -> None:
+    await init_db()
+    log.info("[api] Database initialised on startup.")
+
+
+# ---------------------------------------------------------------------------
+# Request / Response schemas
+# ---------------------------------------------------------------------------
 
 class SubmitRequest(BaseModel):
-    url: Optional[str] = None
+    url:        Optional[str] = None
     local_path: Optional[str] = None
 
 
 class SubmitResponse(BaseModel):
-    job_id: str
+    job_id:  str
     message: str
 
+
+class JobStatusResponse(BaseModel):
+    job_id:       str
+    status:       str
+    url:          Optional[str]
+    ingest_source: Optional[str]
+    error:        Optional[str]
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health():
@@ -53,51 +78,50 @@ async def health():
 async def submit(
     request: SubmitRequest,
     background_tasks: BackgroundTasks,
-):
+) -> SubmitResponse:
     """Submit a video URL or local path for async fact-checking."""
     if not request.url and not request.local_path:
         raise HTTPException(status_code=400, detail="Provide url or local_path")
 
+    job_id = uuid4()
     local_path = Path(request.local_path) if request.local_path else None
 
-    async def _run():
-        result = await run_pipeline(url=request.url, local_path=local_path)
-        _results[str(result.job.id)] = result
+    async def _run_and_persist() -> None:
+        async with AsyncSessionLocal() as session:
+            try:
+                result = await run_pipeline(
+                    url=request.url,
+                    local_path=local_path,
+                    job_id=job_id,
+                )
+                await save_pipeline_result(session, result)
+                await session.commit()
+                log.info("[api] Job %s completed with status %s", job_id, result.job.status)
+            except Exception as exc:
+                await session.rollback()
+                log.error("[api] Job %s failed: %s", job_id, exc)
 
-    background_tasks.add_task(_run)
+    background_tasks.add_task(_run_and_persist)
 
-    # Return a placeholder job ID immediately
-    from uuid import uuid4
-    job_id = str(uuid4())
-    return SubmitResponse(job_id=job_id, message="Job submitted. Results available at /jobs/{job_id} once complete.")
-
-
-@app.post("/submit/sync", response_model=PipelineResult)
-async def submit_sync(request: SubmitRequest):
-    """Submit synchronously and wait for full result (use for short videos)."""
-    if not request.url and not request.local_path:
-        raise HTTPException(status_code=400, detail="Provide url or local_path")
-    local_path = Path(request.local_path) if request.local_path else None
-    result = await run_pipeline(url=request.url, local_path=local_path)
-    _results[str(result.job.id)] = result
-    return result
-
-
-@app.get("/jobs/{job_id}")
-async def get_job(job_id: str):
-    """Retrieve a completed job result."""
-    result = _results.get(job_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Job not found or still running")
-    return result
+    return SubmitResponse(
+        job_id=str(job_id),
+        message="Job submitted. Poll /jobs/{job_id} for status.",
+    )
 
 
-@app.get("/jobs")
-async def list_jobs():
-    """List all completed job IDs."""
-    return {
-        "jobs": [
-            {"job_id": jid, "status": r.job.status.value, "url": r.job.url}
-            for jid, r in _results.items()
-        ]
-    }
+@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_job(
+    job_id: UUID,
+    session: AsyncSession = Depends(get_session),
+) -> JobStatusResponse:
+    """Fetch the current status of a fact-checking job from the database."""
+    row = await get_job_row(session, job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return JobStatusResponse(
+        job_id=str(row.id),
+        status=row.status,
+        url=row.url,
+        ingest_source=row.ingest_source,
+        error=row.error,
+    )
