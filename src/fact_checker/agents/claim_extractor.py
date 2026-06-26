@@ -8,7 +8,7 @@ from uuid import UUID
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ..config import settings
+from ..config import build_chat_model
 from ..models import Claim, TranscriptSegment
 
 log = logging.getLogger(__name__)
@@ -21,62 +21,52 @@ def _load_prompt() -> str:
 
 
 def _build_llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        model=settings.openrouter_model,
-        openai_api_key=settings.openrouter_api_key,
-        openai_api_base=settings.openrouter_base_url,
-        temperature=0.1,
-        max_tokens=4096,
-    )
+    """Use extraction task slot -> openai/gpt-oss-120b:free for structured JSON output."""
+    return build_chat_model(task="extraction", temperature=0.1, max_tokens=4096)
 
 
 async def extract_claims(
     job_id: UUID,
     segments: list[TranscriptSegment],
-    chunk_size: int = 50,
 ) -> list[Claim]:
-    """Send transcript chunks to the LLM; return parsed Claim objects."""
+    """Extract checkable claims from transcript segments."""
+    if not segments:
+        return []
+
     llm = _build_llm()
     system_prompt = _load_prompt()
-    all_claims: list[Claim] = []
+    full_text = "\n".join(
+        f"[{s.start_sec:.1f}s - {s.end_sec:.1f}s] {s.text}" for s in segments
+    )
 
-    # Build transcript text with timestamps
-    transcript_lines = [
-        f"[{s.start_sec:.1f}s] {s.text}"
-        for s in segments
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"TRANSCRIPT:\n{full_text}"),
     ]
 
-    # Chunk to avoid context overflow on very long videos
-    for i in range(0, len(transcript_lines), chunk_size):
-        chunk = "\n".join(transcript_lines[i:i + chunk_size])
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"TRANSCRIPT CHUNK:\n{chunk}\n\nExtract all checkable factual claims as JSON."),
-        ]
-        log.info("[ClaimExtractor] Processing chunk %d/%d", i // chunk_size + 1, -(-len(transcript_lines) // chunk_size))
-        response = await llm.ainvoke(messages)
-        raw = response.content.strip()
+    try:
+        response = llm.invoke(messages)
+        raw: list[dict] = json.loads(response.content)
+    except Exception as exc:
+        log.error("[claim_extractor] LLM call or JSON parse failed: %s", exc)
+        return []
 
-        # Strip markdown code fences if present
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
+    claims: list[Claim] = []
+    for item in raw:
         try:
-            items = json.loads(raw)
-            if isinstance(items, dict) and "claims" in items:
-                items = items["claims"]
-            for item in items:
-                claim = Claim(
+            claims.append(
+                Claim(
                     job_id=job_id,
-                    text=item.get("claim", item.get("text", "")),
+                    segment_id=None,
+                    text=item["text"],
                     is_checkable=item.get("is_checkable", True),
-                    confidence=float(item.get("confidence", 0.8)),
+                    confidence=float(item.get("confidence", 1.0)),
                     context=item.get("context"),
                 )
-                if claim.text:
-                    all_claims.append(claim)
-        except json.JSONDecodeError as e:
-            log.warning("[ClaimExtractor] JSON parse error: %s | raw=%s", e, raw[:200])
+            )
+        except (KeyError, TypeError) as exc:
+            log.warning("[claim_extractor] Skipping malformed claim item: %s", exc)
+            continue
 
-    log.info("[ClaimExtractor] Extracted %d claims from %d segments", len(all_claims), len(segments))
-    return all_claims
+    log.info("[claim_extractor] Extracted %d claims from %d segments", len(claims), len(segments))
+    return claims
