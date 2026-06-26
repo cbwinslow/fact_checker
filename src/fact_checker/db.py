@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import AsyncGenerator
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey, String, Text,
+    Boolean, Column, DateTime, Float, ForeignKey, Numeric, String, Text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import (
@@ -52,8 +52,22 @@ class VideoJobRow(Base):
     created_at    = Column(DateTime, default=datetime.utcnow)
     updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    claims   = relationship("ClaimRow",   back_populates="job", cascade="all, delete-orphan")
-    verdicts = relationship("VerdictRow", back_populates="job", cascade="all, delete-orphan")
+    segments = relationship("TranscriptSegmentRow", back_populates="job", cascade="all, delete-orphan")
+    claims   = relationship("ClaimRow",             back_populates="job", cascade="all, delete-orphan")
+    verdicts = relationship("VerdictRow",           back_populates="job", cascade="all, delete-orphan")
+
+
+class TranscriptSegmentRow(Base):
+    __tablename__ = "transcript_segments"
+
+    id        = Column(PGUUID(as_uuid=True), primary_key=True)
+    job_id    = Column(PGUUID(as_uuid=True), ForeignKey("video_jobs.id", ondelete="CASCADE"), nullable=False)
+    start_sec = Column(Numeric(10, 3), nullable=True)
+    end_sec   = Column(Numeric(10, 3), nullable=True)
+    text      = Column(Text, nullable=False)
+    speaker   = Column(Text, nullable=True)
+
+    job = relationship("VideoJobRow", back_populates="segments")
 
 
 class ClaimRow(Base):
@@ -67,8 +81,24 @@ class ClaimRow(Base):
     confidence   = Column(Float, default=1.0)
     context      = Column(Text, nullable=True)
 
-    job      = relationship("VideoJobRow", back_populates="claims")
-    verdicts = relationship("VerdictRow",  back_populates="claim", cascade="all, delete-orphan")
+    job            = relationship("VideoJobRow",     back_populates="claims")
+    verdicts       = relationship("VerdictRow",       back_populates="claim",    cascade="all, delete-orphan")
+    evidence_items = relationship("EvidenceItemRow", back_populates="claim",    cascade="all, delete-orphan")
+
+
+class EvidenceItemRow(Base):
+    __tablename__ = "evidence_items"
+
+    id                  = Column(PGUUID(as_uuid=True), primary_key=True)
+    claim_id            = Column(PGUUID(as_uuid=True), ForeignKey("claims.id", ondelete="CASCADE"), nullable=False)
+    source_url          = Column(Text, nullable=False)
+    title               = Column(Text, nullable=True)
+    snippet             = Column(Text, nullable=True)
+    relevance_score     = Column(Numeric(4, 3), default=0.0)
+    is_factcheck_source = Column(Boolean, default=False)
+    created_at          = Column(DateTime, default=datetime.utcnow)
+
+    claim = relationship("ClaimRow", back_populates="evidence_items")
 
 
 class VerdictRow(Base):
@@ -117,9 +147,9 @@ async def init_db() -> None:
 # ---------------------------------------------------------------------------
 
 async def save_pipeline_result(session: AsyncSession, result) -> None:
-    """Persist a PipelineResult (job + claims + verdicts) to the database."""
+    """Persist a full PipelineResult (job + segments + claims + evidence + verdicts)."""
     job = result.job
-    job_row = VideoJobRow(
+    session.add(VideoJobRow(
         id=job.id,
         url=job.url,
         local_path=job.local_path,
@@ -128,8 +158,17 @@ async def save_pipeline_result(session: AsyncSession, result) -> None:
         error=job.error,
         created_at=job.created_at,
         updated_at=job.updated_at,
-    )
-    session.add(job_row)
+    ))
+
+    for seg in result.segments:
+        session.add(TranscriptSegmentRow(
+            id=seg.id,
+            job_id=job.id,
+            start_sec=seg.start_sec,
+            end_sec=seg.end_sec,
+            text=seg.text,
+            speaker=seg.speaker,
+        ))
 
     for claim in result.claims:
         session.add(ClaimRow(
@@ -140,6 +179,17 @@ async def save_pipeline_result(session: AsyncSession, result) -> None:
             is_checkable=claim.is_checkable,
             confidence=claim.confidence,
             context=claim.context,
+        ))
+
+    for ev in result.evidence:
+        session.add(EvidenceItemRow(
+            id=ev.id,
+            claim_id=ev.claim_id,
+            source_url=ev.source_url,
+            title=ev.title,
+            snippet=ev.snippet,
+            relevance_score=ev.relevance_score,
+            is_factcheck_source=ev.is_factcheck_source,
         ))
 
     for verdict in result.verdicts:
@@ -154,7 +204,8 @@ async def save_pipeline_result(session: AsyncSession, result) -> None:
         ))
 
     await session.flush()
-    log.info("[db] Saved pipeline result for job %s", job.id)
+    log.info("[db] Persisted pipeline result for job %s (%d segments, %d claims, %d evidence, %d verdicts)",
+             job.id, len(result.segments), len(result.claims), len(result.evidence), len(result.verdicts))
 
 
 async def get_job_row(session: AsyncSession, job_id) -> VideoJobRow | None:
