@@ -33,11 +33,39 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://fact_checker:password@db:5432/fact_checker
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-nvidia/nemotron-ultra-253b-v1:free}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-nvidia/nemotron-3-ultra-253b:free}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      API_SECRET_KEY: ${API_SECRET_KEY:-changeme}
     ports:
       - "8000:8000"
     volumes:
+      - ./artifacts:/app/artifacts
+      - ./media_cache:/app/media_cache
+    # Production: no --reload
+    command: uvicorn fact_checker.api:app --host 0.0.0.0 --port 8000 --workers 2
+
+  # Development override: mount source + enable reload
+  api-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fact_checker_api_dev
+    restart: unless-stopped
+    profiles:
+      - dev
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fact_checker:password@db:5432/fact_checker
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-oss-120b:free}
+      LOG_LEVEL: DEBUG
+      API_SECRET_KEY: ${API_SECRET_KEY:-devkey}
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
       - ./artifacts:/app/artifacts
       - ./media_cache:/app/media_cache
     command: uvicorn fact_checker.api:app --host 0.0.0.0 --port 8000 --reload
