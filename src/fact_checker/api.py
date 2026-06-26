@@ -3,7 +3,7 @@
 Endpoints:
   POST /submit              - Submit URL or file path for async fact-checking
   GET  /jobs/{job_id}       - Get job result by ID from database
-  GET  /health              - Health check
+  GET  /health              - Health check (unauthenticated)
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .auth import require_api_key
 from .db import AsyncSessionLocal, get_session, init_db, save_pipeline_result, get_job_row
 from .harness import run_pipeline
 from .models import JobStatus
@@ -48,21 +49,21 @@ async def on_startup() -> None:
 # ---------------------------------------------------------------------------
 
 class SubmitRequest(BaseModel):
-    url:        Optional[str] = None
+    url: Optional[str] = None
     local_path: Optional[str] = None
 
 
 class SubmitResponse(BaseModel):
-    job_id:  str
+    job_id: str
     message: str
 
 
 class JobStatusResponse(BaseModel):
-    job_id:       str
-    status:       str
-    url:          Optional[str]
+    job_id: str
+    status: str
+    url: Optional[str]
     ingest_source: Optional[str]
-    error:        Optional[str]
+    error: Optional[str]
 
 
 # ---------------------------------------------------------------------------
@@ -71,18 +72,19 @@ class JobStatusResponse(BaseModel):
 
 @app.get("/health")
 async def health():
+    """Unauthenticated health check - used by load balancers and CI."""
     return {"status": "ok", "version": "0.1.0"}
 
 
-@app.post("/submit", response_model=SubmitResponse)
+@app.post("/submit", response_model=SubmitResponse, status_code=202)
 async def submit(
     request: SubmitRequest,
     background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_api_key),
 ) -> SubmitResponse:
     """Submit a video URL or local path for async fact-checking."""
     if not request.url and not request.local_path:
-        raise HTTPException(status_code=400, detail="Provide url or local_path")
-
+        raise HTTPException(status_code=422, detail="Provide url or local_path")
     job_id = uuid4()
     local_path = Path(request.local_path) if request.local_path else None
 
@@ -102,7 +104,6 @@ async def submit(
                 log.error("[api] Job %s failed: %s", job_id, exc)
 
     background_tasks.add_task(_run_and_persist)
-
     return SubmitResponse(
         job_id=str(job_id),
         message="Job submitted. Poll /jobs/{job_id} for status.",
@@ -113,15 +114,16 @@ async def submit(
 async def get_job(
     job_id: UUID,
     session: AsyncSession = Depends(get_session),
+    _auth: None = Depends(require_api_key),
 ) -> JobStatusResponse:
     """Fetch the current status of a fact-checking job from the database."""
     row = await get_job_row(session, job_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     return JobStatusResponse(
-        job_id=str(row.id),
+        job_id=str(row.job_id),
         status=row.status,
         url=row.url,
         ingest_source=row.ingest_source,
-        error=row.error,
+        error=row.error_message,
     )
