@@ -120,10 +120,11 @@ async def get_job(
     row = await get_job_row(session, job_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    # NOTE: VideoJobRow uses .id and .error (not .job_id / .error_message)
     return JobStatusResponse(
-        job_id=str(row.job_id),
+        job_id=str(row.id),
         status=row.status,
         url=row.url,
         ingest_source=row.ingest_source,
-        error=row.error_message,
+        error=row.error,
     )
