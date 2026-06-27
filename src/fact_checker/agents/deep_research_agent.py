@@ -84,9 +84,9 @@ def _credibility_score(url: str) -> float:
         Float in [0.0, 1.0].
     """
     domain = re.sub(r"https?://(www\.)?", "", url).split("/")[0].lower()
-    if any(t1 in domain for t1 in _TIER_1_DOMAINS):
+        if any(domain == t1 or domain.endswith('.' + t1) for t1 in _TIER_1_DOMAINS):
         return 0.90
-    if any(t2 in domain for t2 in _TIER_2_DOMAINS):
+        if any(domain == t2 or domain.endswith('.' + t2) for t2 in _TIER_2_DOMAINS):
         return 0.70
     return 0.40
 
