@@ -249,14 +249,22 @@ class MediaRouter:
         import httpx
         suffix = Path(url.split("?")[0]).suffix or ".mp3"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.get(url, follow_redirects=True)
-            resp.raise_for_status()
-            tmp_path.write_bytes(resp.content)
-        log.info("[router] Downloaded audio %s -> %s", url, tmp_path.name)
-        from .audio_ingest import ingest_audio_file
-        return await ingest_audio_file(job_id=job_id, audio_path=tmp_path)
+                  try:
+                tmp_path = Path(tmp.name)
+            async with httpx.AsyncClient(timeout=120) as client:
+                    resp = await client.get(url, follow_redirects=True)
+                    resp.raise_for_status()
+                    tmp_path.write_bytes(resp.content)
+            log.info("[router] Downloaded audio %s -> %s", url, tmp_path.name)
+            from .audio_ingest import ingest_audio_file
+            return await ingest_audio_file(job_id=job_id, audio_path=tmp_path)
+                            finally:
+            # Clean up temporary file
+            try:
+                tmp_path.unlink()
+                log.debug(f"[router] Cleaned up temp file: {tmp_path}")
+            except Exception as e:
+                log.warning(f"[router] Failed to cleanup temp file {tmp_path}: {e}")
 
     async def _ingest_pdf(
         self, job_id: UUID, path: Path
@@ -272,13 +280,21 @@ class MediaRouter:
         import tempfile
         import httpx
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.get(url, follow_redirects=True)
-            resp.raise_for_status()
-            tmp_path.write_bytes(resp.content)
-        from .pdf_ingest import ingest_pdf
-        return await ingest_pdf(job_id=job_id, pdf_path=tmp_path)
+                  try:
+                tmp_path = Path(tmp.name)
+            async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.get(url, follow_redirects=True)
+                    resp.raise_for_status()
+                    tmp_path.write_bytes(resp.content)
+            from .pdf_ingest import ingest_pdf
+            return await ingest_pdf(job_id=job_id, pdf_path=tmp_path)
+                            finally:
+            # Clean up temporary file
+            try:
+                tmp_path.unlink()
+                log.debug(f"[router] Cleaned up temp file: {tmp_path}")
+            except Exception as e:
+                log.warning(f"[router] Failed to cleanup temp file {tmp_path}: {e}")
 
     async def _ingest_text(
         self, job_id: UUID, path: Path
