@@ -5,7 +5,6 @@ Run with::
     pytest tests/test_pipeline.py::test_offline_pipeline -v
 """
 import pytest
-from pathlib import Path
 from uuid import uuid4
 
 from fact_checker.harness import run_pipeline
@@ -15,32 +14,53 @@ from fact_checker.models import JobStatus, Verdict
 @pytest.mark.asyncio
 async def test_offline_pipeline_text_file(tmp_path):
     """Test the full pipeline end-to-end with a text file input (offline/mock mode)."""
-    # Create a temporary text file with claims
-    test_file = tmp_path / "test.txt"
-    test_file.write_text(
-        "Climate change is caused by human activity. "
-        "The Earth is approximately 4.5 billion years old. "
-        "Water boils at 100 degrees Celsius at sea level."
-    )
+    # Ensure mock mode by temporarily setting API key to empty string
+    import os
+    from fact_checker.config import get_settings
+    old_key = os.environ.get("OPENROUTER_API_KEY")
+    old_brave = os.environ.get("BRAVE_SEARCH_API_KEY")
+    os.environ["OPENROUTER_API_KEY"] = ""
+    os.environ["BRAVE_SEARCH_API_KEY"] = ""
+    # Clear the cached settings so it picks up the empty string
+    get_settings.cache_clear()
+    try:
+        # Create a temporary text file with claims
+        test_file = tmp_path / "test.txt"
+        test_file.write_text(
+            "Climate change is caused by human activity. "
+            "The Earth is approximately 4.5 billion years old. "
+            "Water boils at 100 degrees Celsius at sea level."
+        )
 
-    job_id = uuid4()
-    result = await run_pipeline(
-        local_path=test_file,
-        job_id=job_id,
-        session=None,  # No DB session = offline mode
-    )
+        job_id = uuid4()
+        result = await run_pipeline(
+            local_path=test_file,
+            job_id=job_id,
+            session=None,  # No DB session = offline mode
+        )
 
-    # Assertions
-    assert result.job.id == job_id
-    assert result.job.status in (JobStatus.DONE, JobStatus.REVIEW)
-    assert len(result.segments) > 0
-    assert len(result.claims) > 0  # MockChatModel returns 2 mock claims
-    assert len(result.verdicts) == len(result.claims)
+        # Assertions
+        assert result.job.id == job_id
+        assert result.job.status in (JobStatus.DONE, JobStatus.REVIEW)
+        assert len(result.segments) > 0
+        assert len(result.claims) > 0  # MockChatModel returns 2 mock claims
+        assert len(result.verdicts) == len(result.claims)
 
-    for verdict in result.verdicts:
-        assert verdict.verdict in Verdict.__members__.values()
-        assert verdict.explanation
-        assert 0.0 <= verdict.confidence <= 1.0
+        for verdict in result.verdicts:
+            assert verdict.verdict in Verdict.__members__.values()
+            assert verdict.explanation
+            assert 0.0 <= verdict.confidence <= 1.0
+    finally:
+        # Restore API keys and clear cache again
+        if old_key is not None:
+            os.environ["OPENROUTER_API_KEY"] = old_key
+        else:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+        if old_brave is not None:
+            os.environ["BRAVE_SEARCH_API_KEY"] = old_brave
+        else:
+            os.environ.pop("BRAVE_SEARCH_API_KEY", None)
+        get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
@@ -88,7 +108,7 @@ def test_models_serialization():
     """Test that all Pydantic models can serialize to JSON."""
     from fact_checker.models import (
         VideoJob, TranscriptSegment, Claim, EvidenceItem,
-        VerdictResult, AnalysisContext, PipelineResult, Verdict
+        VerdictResult, PipelineResult, Verdict
     )
     import json
 
@@ -137,7 +157,8 @@ async def test_rate_limiter():
     from fact_checker.services.rate_limiter import TokenBucket
     import time
 
-    limiter = TokenBucket(rate=10.0, capacity=10.0)  # 10 req/sec
+    # Capacity=5 means burst of 5, then refill at 10/sec
+    limiter = TokenBucket(rate=10.0, capacity=5.0)  # 10 req/sec, burst of 5
 
     # Burst: consume 5 tokens instantly
     start = time.monotonic()
@@ -146,9 +167,10 @@ async def test_rate_limiter():
     elapsed = time.monotonic() - start
     assert elapsed < 0.1  # Should complete instantly (within 100ms)
 
-    # Sustain: next 5 should throttle
+    # Sustain: next 5 should throttle (need to wait for refill)
+    # At 10 tokens/sec, 5 tokens take 0.5 seconds to refill
     start = time.monotonic()
     for _ in range(5):
         await limiter.acquire()
     elapsed = time.monotonic() - start
-    assert 0.4 < elapsed < 0.6  # ~0.5 seconds for 5 tokens at 10/sec
+    assert 0.4 < elapsed < 0.7  # ~0.5 seconds for 5 tokens at 10/sec

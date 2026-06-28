@@ -6,7 +6,7 @@ All async tests should be decorated with @pytest.mark.asyncio.
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from httpx import AsyncClient, ASGITransport
@@ -15,8 +15,6 @@ from fact_checker.models import (
     Claim,
     EvidenceItem,
     TranscriptSegment,
-    VerdictResult,
-    Verdict,
 )
 
 

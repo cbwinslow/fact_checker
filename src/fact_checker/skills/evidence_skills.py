@@ -241,3 +241,94 @@ def rank_evidence_snippets(
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return [item for _, item in scored[:max_results]]
+
+
+# ---------------------------------------------------------------------------
+# Source diversity & contradiction detection
+# ---------------------------------------------------------------------------
+
+
+def enforce_source_diversity(evidence: List[EvidenceItem]) -> Dict[str, object]:
+    """Enforce source diversity requirements on evidence set.
+    
+    Returns a diversity report with pass/fail status and details.
+    """
+    from datetime import datetime
+    domains = set(ev.domain for ev in evidence if ev.domain)
+    types = set(ev.source_type for ev in evidence if ev.source_type)
+    has_factcheck = any(ev.is_factcheck_source for ev in evidence)
+    
+    # Temporal freshness
+    now = datetime.now()
+    fresh_count = 0
+    for ev in evidence:
+        if ev.published_date:
+            age_days = (now - ev.published_date).days
+            if age_days < 365:
+                fresh_count += 1
+    
+    meets_diversity = (
+        len(domains) >= 3 and
+        len(types) >= 2 and
+        (has_factcheck or len(evidence) >= 5)
+    )
+    
+    return {
+        "unique_domains": len(domains),
+        "domains": list(domains),
+        "source_types": list(types),
+        "has_factcheck_source": has_factcheck,
+        "fresh_sources": fresh_count,
+        "total_sources": len(evidence),
+        "meets_diversity": meets_diversity,
+    }
+
+
+def detect_contradictions(evidence: List[EvidenceItem]) -> List[Dict[str, object]]:
+    """Detect contradictory evidence using stance classification.
+    
+    Returns list of contradiction pairs with details.
+    """
+    # This is a heuristic - in production, would use LLM stance classification
+    # For now, we detect based on high-relevance items from different domains
+    # that might contradict (simplified)
+    
+    high_relevance = [ev for ev in evidence if ev.relevance_score >= 0.7]
+    contradictions = []
+    
+    # Simple heuristic: if we have fact-check sources with different ratings
+    factcheck_items = [ev for ev in high_relevance if ev.is_factcheck_source]
+    if len(factcheck_items) >= 2:
+        # Check if snippets suggest different conclusions
+        for i, ev1 in enumerate(factcheck_items):
+            for ev2 in factcheck_items[i+1:]:
+                # Very simplified - would need NLP in production
+                if "true" in ev1.snippet.lower() and "false" in ev2.snippet.lower():
+                    contradictions.append({
+                        "evidence_1_id": str(ev1.id),
+                        "evidence_2_id": str(ev2.id),
+                        "type": "factcheck_disagreement",
+                        "description": "Fact-check sources disagree on claim veracity",
+                    })
+                elif "false" in ev1.snippet.lower() and "true" in ev2.snippet.lower():
+                    contradictions.append({
+                        "evidence_1_id": str(ev1.id),
+                        "evidence_2_id": str(ev2.id),
+                        "type": "factcheck_disagreement",
+                        "description": "Fact-check sources disagree on claim veracity",
+                    })
+    
+    return contradictions
+
+
+def check_diversity_and_contradictions(evidence: List[EvidenceItem]) -> Dict[str, object]:
+    """Combined check for diversity and contradictions."""
+    diversity_report = enforce_source_diversity(evidence)
+    contradictions = detect_contradictions(evidence)
+    
+    return {
+        "diversity": diversity_report,
+        "contradictions": contradictions,
+        "has_contradictions": len(contradictions) > 0,
+        "meets_all_criteria": diversity_report["meets_diversity"] and len(contradictions) == 0,
+    }

@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from ..config import settings
+from ..config import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ async def probe(media_path: Path) -> dict:
 async def extract_audio(media_path: Path, output_dir: Optional[Path] = None) -> Path:
     """Extract audio as 16kHz mono WAV (optimal for Whisper ASR)."""
     ffmpeg = _require_binary("ffmpeg")
-    out_dir = output_dir or settings.media_cache_dir
+    out_dir = output_dir or get_settings().media_cache_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{media_path.stem}_audio.wav"
 

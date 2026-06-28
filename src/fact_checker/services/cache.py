@@ -4,9 +4,9 @@ Caches serialised PipelineResult objects so repeated requests for the same URL
 or content hash return immediately without re-running the full pipeline.
 
 Backend resolution order:
-  1. Redis (via ``redis.asyncio``) if ``settings.redis_url`` is set.
+  1. Redis (via ``redis.asyncio``) if ``get_settings().redis_url`` is set.
   2. In-process LRU dict (``_MemoryCache``) for single-process deployments or
-     when Redis is unavailable.  Limited to ``settings.cache_max_size`` entries.
+     when Redis is unavailable.  Limited to ``get_settings().cache_max_size`` entries.
 
 Dependencies (optional)::
     pip install redis
@@ -18,7 +18,7 @@ import json
 import logging
 from typing import Any, Optional
 
-from ..config import settings
+from ..config import get_settings
 
 log = logging.getLogger(__name__)
 

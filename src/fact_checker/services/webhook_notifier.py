@@ -6,7 +6,7 @@ completes, fails, or requires human review.  The caller registers a
 
 Features:
 - Automatic retries with exponential back-off (up to 3 attempts).
-- HMAC-SHA256 request signing via ``settings.webhook_secret``.
+- HMAC-SHA256 request signing via ``get_settings().webhook_secret``.
 - Non-blocking: failures are logged but never re-raise.
 
 Dependencies::
@@ -24,7 +24,7 @@ from uuid import UUID
 
 import httpx
 
-from ..config import settings
+from ..config import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ async def notify_webhook(
             ...extra fields...
         }
 
-    If ``settings.webhook_secret`` is set, an HMAC-SHA256 signature of the
+    If ``get_settings().webhook_secret`` is set, an HMAC-SHA256 signature of the
     raw JSON body is attached in the ``X-Fact-Checker-Signature`` header so
     receivers can verify authenticity.
 

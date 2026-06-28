@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
-from ..config import settings
+from ..config import get_settings
 from ..models import IngestSource, TranscriptSegment
 
 log = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 async def _fetch_ytdlp_captions(url: str, job_id: UUID) -> list[TranscriptSegment]:
     """Download auto/manual captions via yt-dlp as VTT, parse to segments."""
-    import tempfile, json
+    import tempfile
     out_dir = Path(tempfile.mkdtemp())
     cmd = [
         "yt-dlp",
@@ -104,9 +104,9 @@ async def _transcribe_whisper(audio_path: Path, job_id: UUID) -> list[Transcript
 
     def _run():
         model = WhisperModel(
-            settings.whisper_model_size,
-            device=settings.whisper_device,
-            compute_type=settings.whisper_compute_type,
+            get_settings().whisper_model_size,
+            device=get_settings().whisper_device,
+            compute_type=get_settings().whisper_compute_type,
         )
         segs, _ = model.transcribe(str(audio_path), beam_size=5)
         return list(segs)

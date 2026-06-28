@@ -11,7 +11,7 @@ import json
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator, List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, BaseMessage
@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     # Evidence / Search
     google_factcheck_api_key: str = ""
     serper_api_key:           str = ""
+    brave_search_api_key:     str = ""
 
 
 @lru_cache(maxsize=1)

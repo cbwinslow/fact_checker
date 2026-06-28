@@ -44,7 +44,6 @@ from .models import (
 )
 from .services.file_router import MediaRouter
 from .agents.claim_extractor import extract_claims
-from .agents.evidence_agent import retrieve_evidence
 from .agents.verdict_agent import draft_verdicts
 from .agents.image_analyst import analyse_images
 from .agents.deep_research_agent import deep_research
@@ -153,6 +152,10 @@ async def run_pipeline(
     job_id=None,
     session=None,
     image_paths: Optional[List[str]] = None,
+    # User-provided context
+    user_context: Optional[str] = None,
+    user_question: Optional[str] = None,
+    focus_areas: Optional[List[str]] = None,
 ) -> PipelineResult:
     """Run the full fact-checking pipeline and return a PipelineResult.
 
@@ -188,7 +191,12 @@ async def run_pipeline(
     )
 
     # Initialise the shared AnalysisContext packet
-    ctx = AnalysisContext(job_id=job_id)
+    ctx = AnalysisContext(
+        job_id=job_id,
+        user_context=user_context,
+        user_question=user_question,
+        focus_areas=focus_areas or [],
+    )
 
     try:
         # ----------------------------------------------------------------
@@ -282,7 +290,13 @@ async def run_pipeline(
         job.status = JobStatus.EXTRACTING
         await _update_job_status(job_id, JobStatus.EXTRACTING, session=session)
 
-        ctx.claims = await extract_claims(job_id=job_id, segments=ctx.segments)
+        ctx.claims = await extract_claims(
+            job_id=job_id,
+            segments=ctx.segments,
+            user_context=ctx.user_context,
+            user_question=ctx.user_question,
+            focus_areas=ctx.focus_areas,
+        )
 
         # Promote visible_claims from each ImageAnalysis as Claim objects
         for img_analysis in ctx.images:

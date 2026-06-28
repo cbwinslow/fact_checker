@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 # Read once at import time; reload the app to pick up changes.

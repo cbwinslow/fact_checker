@@ -7,11 +7,10 @@ Priority order:
 """
 from __future__ import annotations
 import logging
-from pathlib import Path
 from uuid import UUID
 import httpx
 
-from ..config import settings
+from ..config import get_settings
 from ..models import Claim, EvidenceItem
 
 log = logging.getLogger(__name__)
@@ -19,10 +18,10 @@ log = logging.getLogger(__name__)
 
 async def _google_factcheck(claim_text: str, claim_id: UUID) -> list[EvidenceItem]:
     """Query Google Fact Check Tools API."""
-    if not settings.google_factcheck_api_key:
+    if not get_settings().google_factcheck_api_key:
         return []
     url = "https://factchecktools.googleapis.com/v1alpha1/claims:search"
-    params = {"query": claim_text, "key": settings.google_factcheck_api_key, "pageSize": 5}
+    params = {"query": claim_text, "key": get_settings().google_factcheck_api_key, "pageSize": 5}
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(url, params=params)
         if resp.status_code != 200:
@@ -44,12 +43,12 @@ async def _google_factcheck(claim_text: str, claim_id: UUID) -> list[EvidenceIte
 
 async def _serper_search(claim_text: str, claim_id: UUID) -> list[EvidenceItem]:
     """Use Serper.dev for general web evidence retrieval."""
-    if not settings.serper_api_key:
+    if not get_settings().serper_api_key:
         return []
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
             "https://google.serper.dev/search",
-            headers={"X-API-KEY": settings.serper_api_key, "Content-Type": "application/json"},
+            headers={"X-API-KEY": get_settings().serper_api_key, "Content-Type": "application/json"},
             json={"q": claim_text, "num": 5},
         )
         if resp.status_code != 200:

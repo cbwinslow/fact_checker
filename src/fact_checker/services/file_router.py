@@ -249,16 +249,16 @@ class MediaRouter:
         import httpx
         suffix = Path(url.split("?")[0]).suffix or ".mp3"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                  try:
-                tmp_path = Path(tmp.name)
+            tmp_path = Path(tmp.name)
+        try:
             async with httpx.AsyncClient(timeout=120) as client:
-                    resp = await client.get(url, follow_redirects=True)
-                    resp.raise_for_status()
-                    tmp_path.write_bytes(resp.content)
+                resp = await client.get(url, follow_redirects=True)
+                resp.raise_for_status()
+                tmp_path.write_bytes(resp.content)
             log.info("[router] Downloaded audio %s -> %s", url, tmp_path.name)
             from .audio_ingest import ingest_audio_file
             return await ingest_audio_file(job_id=job_id, audio_path=tmp_path)
-                            finally:
+        finally:
             # Clean up temporary file
             try:
                 tmp_path.unlink()
@@ -280,15 +280,15 @@ class MediaRouter:
         import tempfile
         import httpx
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                  try:
-                tmp_path = Path(tmp.name)
+            tmp_path = Path(tmp.name)
+        try:
             async with httpx.AsyncClient(timeout=60) as client:
-                    resp = await client.get(url, follow_redirects=True)
-                    resp.raise_for_status()
-                    tmp_path.write_bytes(resp.content)
+                resp = await client.get(url, follow_redirects=True)
+                resp.raise_for_status()
+                tmp_path.write_bytes(resp.content)
             from .pdf_ingest import ingest_pdf
             return await ingest_pdf(job_id=job_id, pdf_path=tmp_path)
-                            finally:
+        finally:
             # Clean up temporary file
             try:
                 tmp_path.unlink()

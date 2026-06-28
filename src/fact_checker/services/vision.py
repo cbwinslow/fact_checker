@@ -17,11 +17,9 @@ from __future__ import annotations
 import base64
 import logging
 import math
-import os
 import subprocess
 from pathlib import Path
 from typing import List, Optional
-from uuid import UUID
 
 from ..models import ImageMetadata
 

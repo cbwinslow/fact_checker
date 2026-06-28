@@ -18,10 +18,13 @@ def _make_job_row(status: str = "pending") -> MagicMock:
     """Return a minimal mock VideoJobRow."""
     row = MagicMock()
     row.job_id = FAKE_JOB_ID
+    row.id = FAKE_JOB_ID  # API uses row.id
     row.status = status
     row.url = "https://youtube.com/watch?v=test"
     row.ingest_source = "youtube"
-    row.error_message = None
+    row.error = None  # API uses row.error, not row.error_message
+    row.created_at = None
+    row.updated_at = None
     row.claims = []
     row.verdicts = []
     return row
@@ -79,6 +82,7 @@ class TestSubmit:
     async def test_submit_url_returns_202(self, client):
         with (
             patch("fact_checker.api.get_session"),
+            patch("fact_checker.api.AsyncSessionLocal"),
             patch("fact_checker.api.save_pipeline_result", new_callable=AsyncMock),
             patch("fact_checker.api.run_pipeline", new_callable=AsyncMock),
         ):
@@ -91,6 +95,7 @@ class TestSubmit:
     async def test_submit_returns_job_id(self, client):
         with (
             patch("fact_checker.api.get_session"),
+            patch("fact_checker.api.AsyncSessionLocal"),
             patch("fact_checker.api.save_pipeline_result", new_callable=AsyncMock),
             patch("fact_checker.api.run_pipeline", new_callable=AsyncMock),
         ):
@@ -112,6 +117,7 @@ class TestSubmit:
     async def test_submit_local_path(self, client):
         with (
             patch("fact_checker.api.get_session"),
+            patch("fact_checker.api.AsyncSessionLocal"),
             patch("fact_checker.api.save_pipeline_result", new_callable=AsyncMock),
             patch("fact_checker.api.run_pipeline", new_callable=AsyncMock),
         ):
@@ -131,10 +137,9 @@ class TestGetJob:
     @pytest.mark.anyio
     async def test_get_job_found(self, client):
         mock_row = _make_job_row(status="completed")
-        with patch(
-            "fact_checker.api.get_job_row",
-            new_callable=AsyncMock,
-            return_value=mock_row,
+        with (
+            patch("fact_checker.api.get_session"),
+            patch("fact_checker.api.get_job_row", new_callable=AsyncMock, return_value=mock_row),
         ):
             response = await client.get(f"/jobs/{FAKE_JOB_ID}")
         assert response.status_code == 200
@@ -144,10 +149,9 @@ class TestGetJob:
 
     @pytest.mark.anyio
     async def test_get_job_not_found_returns_404(self, client):
-        with patch(
-            "fact_checker.api.get_job_row",
-            new_callable=AsyncMock,
-            return_value=None,
+        with (
+            patch("fact_checker.api.get_session"),
+            patch("fact_checker.api.get_job_row", new_callable=AsyncMock, return_value=None),
         ):
             response = await client.get(f"/jobs/{FAKE_JOB_ID}")
         assert response.status_code == 404
@@ -160,10 +164,9 @@ class TestGetJob:
     @pytest.mark.anyio
     async def test_get_job_pending_status(self, client):
         mock_row = _make_job_row(status="pending")
-        with patch(
-            "fact_checker.api.get_job_row",
-            new_callable=AsyncMock,
-            return_value=mock_row,
+        with (
+            patch("fact_checker.api.get_session"),
+            patch("fact_checker.api.get_job_row", new_callable=AsyncMock, return_value=mock_row),
         ):
             response = await client.get(f"/jobs/{FAKE_JOB_ID}")
         assert response.json()["status"] == "pending"
@@ -171,10 +174,9 @@ class TestGetJob:
     @pytest.mark.anyio
     async def test_get_job_ingest_source_present(self, client):
         mock_row = _make_job_row()
-        with patch(
-            "fact_checker.api.get_job_row",
-            new_callable=AsyncMock,
-            return_value=mock_row,
+        with (
+            patch("fact_checker.api.get_session"),
+            patch("fact_checker.api.get_job_row", new_callable=AsyncMock, return_value=mock_row),
         ):
             response = await client.get(f"/jobs/{FAKE_JOB_ID}")
         assert "ingest_source" in response.json()

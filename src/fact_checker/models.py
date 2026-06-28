@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -130,6 +130,23 @@ class EvidenceItem(BaseModel):
     relevance_score:     float         = 0.0
     credibility_score:   float         = 0.5   # domain-reputation score 0-1
     is_factcheck_source: bool          = False
+    # --- NEW: Quote extraction & source metadata ---
+    quote_text:          Optional[str] = None           # Exact supporting quote
+    quote_context:       Optional[str] = None           # ±200 chars around quote
+    quote_offset:        Optional[int] = None           # Character offset in source
+    domain:              str          = ""              # Normalized domain
+    published_date:      Optional[datetime] = None      # Source publication date
+    author:              Optional[str] = None           # Author if available
+    source_type:         Literal["factcheck", "news", "academic", "government", "wiki", "other"] = "other"
+
+
+class Citation(BaseModel):
+    """A citation linking a verdict explanation fragment to evidence."""
+    evidence_id: UUID
+    quote: str                              # Exact quote from source
+    claim_fragment: str                     # Which part of claim this supports
+    char_start: Optional[int] = None        # Start position in explanation
+    char_end: Optional[int] = None          # End position in explanation
 
 
 class VerdictResult(BaseModel):
@@ -140,6 +157,7 @@ class VerdictResult(BaseModel):
     explanation:           str
     confidence:            float
     evidence_ids:          List[UUID]      = Field(default_factory=list)
+    citations:             List[Citation]  = Field(default_factory=list)  # NEW: Structured citations
     requires_human_review: bool            = False
     reviewed_by:           Optional[str]   = None
     reviewed_at:           Optional[datetime] = None
@@ -252,6 +270,11 @@ class AnalysisContext(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
     job_id:     UUID
+
+    # User-provided context
+    user_context: Optional[str] = None          # User's question, hypothesis, or background info
+    user_question: Optional[str] = None         # Specific question to answer
+    focus_areas: List[str] = Field(default_factory=list)  # Topics to prioritize
 
     # Ingest outputs
     segments:    List[TranscriptSegment] = Field(default_factory=list)

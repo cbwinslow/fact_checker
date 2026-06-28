@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import List, Tuple
 from uuid import UUID
 
-from ..config import settings
+from ..config import get_settings
 from ..models import IngestSource, TranscriptSegment
 
 log = logging.getLogger(__name__)
@@ -170,9 +170,9 @@ async def _transcribe_whisper(
     def _run() -> List[TranscriptSegment]:
         from faster_whisper import WhisperModel
         model = WhisperModel(
-            settings.whisper_model_size,
-            device=settings.whisper_device,
-            compute_type=settings.whisper_compute_type,
+            get_settings().whisper_model_size,
+            device=get_settings().whisper_device,
+            compute_type=get_settings().whisper_compute_type,
         )
         raw_segs, info = model.transcribe(
             str(wav_path),

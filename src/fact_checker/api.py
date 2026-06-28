@@ -19,14 +19,15 @@ from uuid import UUID, uuid4
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import require_api_key
 from .config import settings
 from .db import AsyncSessionLocal, get_session, init_db, save_pipeline_result, get_job_row
 from .harness import run_pipeline
-from .models import JobStatus
+from .models import JobStatus, Citation, EvidenceItem
+from .services.search_providers import get_registry, SearchResult, enrich_search_results_with_quotes
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +67,10 @@ class SubmitRequest(BaseModel):
     local_path: Optional[str] = None
     webhook_url: Optional[str] = None  # POST result here when done
     priority: int = 0                  # higher = processed first (future use)
+    # User-provided context
+    user_context: Optional[str] = None          # Background info, hypothesis
+    user_question: Optional[str] = None         # Specific question to answer
+    focus_areas: List[str] = Field(default_factory=list)  # Topics to prioritize
 
 
 class SubmitResponse(BaseModel):
@@ -195,6 +200,9 @@ async def submit(
                     local_path=local_path,
                     job_id=job_id,
                     session=session,
+                    user_context=request.user_context,
+                    user_question=request.user_question,
+                    focus_areas=request.focus_areas,
                 )
                 await save_pipeline_result(session, result)
                 await session.commit()
@@ -294,7 +302,6 @@ async def delete_job(
     _auth: None = Depends(require_api_key),
 ) -> None:
     """Delete a job and all its associated data (cascades to claims, evidence, verdicts)."""
-    from .db import VideoJobRow
     row = await get_job_row(session, job_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
@@ -354,3 +361,159 @@ async def retry_job(
         job_id=str(job_id),
         message="Job re-queued. Poll /jobs/{job_id} for status.",
     )
+
+
+# ---------------------------------------------------------------------------
+# New endpoints: Citations, Evidence, Streaming
+# ---------------------------------------------------------------------------
+
+
+@app.get("/jobs/{job_id}/citations")
+async def get_citations(
+    job_id: UUID,
+    session: AsyncSession = Depends(get_session),
+    _auth: None = Depends(require_api_key),
+) -> List[dict]:
+    """Get all citations for a completed job's verdicts."""
+    from .db import VerdictRow, EvidenceRow
+    from sqlalchemy import select
+    
+    # Get verdicts for this job
+    verdict_result = await session.execute(
+        select(VerdictRow).where(VerdictRow.job_id == job_id)
+    )
+    verdicts = verdict_result.scalars().all()
+    
+    if not verdicts:
+        raise HTTPException(status_code=404, detail=f"No verdicts found for job {job_id}")
+    
+    # Get evidence for each verdict
+    citations = []
+    for verdict in verdicts:
+        # Parse the JSON explanation for citations
+        # In a real implementation, citations would be stored separately
+        # For now, we return the evidence items linked to this verdict
+        evidence_result = await session.execute(
+            select(EvidenceRow).where(EvidenceRow.claim_id == verdict.claim_id)
+        )
+        evidence_items = evidence_result.scalars().all()
+        
+        for ev in evidence_items:
+            citations.append({
+                "evidence_id": str(ev.id),
+                "claim_id": str(verdict.claim_id),
+                "verdict": verdict.label,
+                "source_url": ev.source_url,
+                "title": ev.title,
+                "snippet": ev.snippet,
+                "relevance_score": ev.relevance_score,
+            })
+    
+    return citations
+
+
+@app.get("/jobs/{job_id}/evidence")
+async def get_evidence(
+    job_id: UUID,
+    session: AsyncSession = Depends(get_session),
+    _auth: None = Depends(require_api_key),
+    claim_id: Optional[UUID] = Query(default=None, description="Filter by claim ID"),
+) -> List[dict]:
+    """Get all evidence items for a job, optionally filtered by claim."""
+    from .db import EvidenceRow, ClaimRow
+    from sqlalchemy import select
+    
+    # Build query
+    query = select(EvidenceRow).join(ClaimRow).where(ClaimRow.job_id == job_id)
+    if claim_id:
+        query = query.where(EvidenceRow.claim_id == claim_id)
+    
+    result = await session.execute(query)
+    evidence_items = result.scalars().all()
+    
+    return [
+        {
+            "evidence_id": str(ev.id),
+            "claim_id": str(ev.claim_id),
+            "source_url": ev.source_url,
+            "title": ev.title,
+            "snippet": ev.snippet,
+            "relevance_score": ev.relevance_score,
+            "is_factcheck_source": False,  # Would need to add this column
+        }
+        for ev in evidence_items
+    ]
+
+
+@app.get("/jobs/{job_id}/stream")
+async def stream_job_progress(
+    job_id: UUID,
+    session: AsyncSession = Depends(get_session),
+    _auth: None = Depends(require_api_key),
+):
+    """Stream real-time pipeline progress as Server-Sent Events (SSE)."""
+    from sse_starlette.sse import EventSourceResponse
+    from .db import VideoJobRow
+    from sqlalchemy import select
+    import asyncio
+    
+    async def event_generator():
+        # Check if job exists
+        result = await session.execute(
+            select(VideoJobRow).where(VideoJobRow.id == job_id)
+        )
+        job = result.scalar_one_or_none()
+        if not job:
+            yield {"event": "error", "data": f"Job {job_id} not found"}
+            return
+        
+        # Send initial status
+        yield {"event": "status", "data": job.status}
+        
+        # Poll for updates
+        last_status = job.status
+        while job.status in ["pending", "ingesting", "transcribing", "analyzing", 
+                            "embedding", "extracting", "researching", "retrieving", "verdicting"]:
+            await asyncio.sleep(2)
+            await session.refresh(job)
+            if job.status != last_status:
+                yield {"event": "status", "data": job.status}
+                last_status = job.status
+                if job.status in ["done", "failed", "review"]:
+                    break
+        
+        # Final status
+        yield {"event": "status", "data": job.status}
+        if job.status == "done":
+            yield {"event": "complete", "data": {"verdict_count": 0}}  # Would fetch actual count
+    
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/search")
+async def search_web(
+    query: str,
+    max_results: int = 10,
+    source_types: Optional[List[str]] = None,
+    _auth: None = Depends(require_api_key),
+) -> List[dict]:
+    """Direct web search using free providers."""
+    registry = get_registry()
+    results = await registry.search_all(
+        query,
+        max_results_per_provider=max_results // 5,
+        source_types=source_types,
+    )
+    
+    return [
+        {
+            "url": r.url,
+            "title": r.title,
+            "snippet": r.snippet,
+            "domain": r.domain,
+            "score": r.score,
+            "provider": r.provider,
+            "source_type": r.source_type,
+        }
+        for r in results
+    ]

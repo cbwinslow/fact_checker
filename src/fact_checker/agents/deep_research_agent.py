@@ -37,7 +37,7 @@ from uuid import UUID
 
 import httpx
 
-from ..config import settings, build_chat_model
+from ..config import get_settings
 from ..models import (
     AnalysisContext,
     Claim,
@@ -83,10 +83,10 @@ def _credibility_score(url: str) -> float:
     Returns:
         Float in [0.0, 1.0].
     """
-    domain = re.sub(r"https?://(www\.)?", "", url).split("/")[0].lower()
-        if any(domain == t1 or domain.endswith('.' + t1) for t1 in _TIER_1_DOMAINS):
+    domain = re.sub(r"https?://(www\\.)?", "", url).split("/")[0].lower()
+    if any(domain == t1 or domain.endswith('.' + t1) for t1 in _TIER_1_DOMAINS):
         return 0.90
-        if any(domain == t2 or domain.endswith('.' + t2) for t2 in _TIER_2_DOMAINS):
+    if any(domain == t2 or domain.endswith('.' + t2) for t2 in _TIER_2_DOMAINS):
         return 0.70
     return 0.40
 
@@ -254,12 +254,12 @@ async def _google_factcheck(claim: Claim) -> List[EvidenceItem]:
     Returns:
         List of EvidenceItem objects from the ClaimReview database.
     """
-    if not settings.google_factcheck_api_key:
+    if not get_settings().google_factcheck_api_key:
         return []
     url = "https://factchecktools.googleapis.com/v1alpha1/claims:search"
     params = {
         "query":    claim.text[:200],
-        "key":      settings.google_factcheck_api_key,
+        "key":      get_settings().google_factcheck_api_key,
         "pageSize": 5,
     }
     try:
@@ -298,7 +298,7 @@ async def _serper_search(
 ) -> List[EvidenceItem]:
     """Search the web using Serper.dev and return EvidenceItem objects.
 
-    Returns an empty list silently when ``settings.serper_api_key`` is not set.
+    Returns an empty list silently when ``get_settings().serper_api_key`` is not set.
 
     Args:
         query:       Search query string.
@@ -308,14 +308,14 @@ async def _serper_search(
     Returns:
         List of EvidenceItem objects from organic search results.
     """
-    if not settings.serper_api_key:
+    if not get_settings().serper_api_key:
         return []
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 "https://google.serper.dev/search",
                 headers={
-                    "X-API-KEY":     settings.serper_api_key,
+                    "X-API-KEY":     get_settings().serper_api_key,
                     "Content-Type":  "application/json",
                 },
                 json={"q": query, "num": num_results},

@@ -24,7 +24,7 @@ import logging
 import time
 from typing import Dict, Optional
 
-from ..config import settings
+from ..config import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -168,7 +168,7 @@ def get_limiter(service: str) -> TokenBucket:
     """Return the singleton rate limiter for a named external service.
 
     Limiter instances are created once and cached for the process lifetime.
-    The RPS is resolved from ``settings.ratelimit_<service>_rps`` with a
+    The RPS is resolved from ``get_settings().ratelimit_<service>_rps`` with a
     fallback to ``_DEFAULT_RPS``.
 
     Args:

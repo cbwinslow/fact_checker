@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import List
+from uuid import UUID
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..config import build_chat_model
-from ..models import Claim, EvidenceItem, Verdict, VerdictResult
+from ..models import Claim, Citation, EvidenceItem, Verdict, VerdictResult
 
 log = logging.getLogger(__name__)
 
@@ -23,8 +25,9 @@ _FALLBACK_PROMPT = """You are an expert fact-checker. Given a CLAIM and a list o
 Respond with ONLY a JSON object with these keys:
 - verdict: one of "supported", "refuted", "insufficient_evidence", "misleading", "unverifiable"
 - confidence: float 0.0-1.0
-- explanation: concise explanation citing evidence (2-4 sentences)
+- explanation: concise explanation citing evidence (2-4 sentences) with [doc_id] markers
 - requires_human_review: boolean
+- citations: array of objects with evidence_id, quote, claim_fragment
 
 Only return the JSON object, no other text."""
 
@@ -45,6 +48,14 @@ def _build_llm() -> BaseChatModel:
     return build_chat_model(task="verification", temperature=0.0, max_tokens=2048)
 
 
+def _extract_json(content: str) -> dict:
+    """Extract JSON from LLM response, handling markdown code fences."""
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    return json.loads(content)
+
+
 async def draft_verdicts(
     claims: list[Claim],
     evidence: list[EvidenceItem],
@@ -63,6 +74,8 @@ async def draft_verdicts(
 
     llm = _build_llm()
     system_prompt = _load_prompt()
+
+    # Build evidence map by claim_id
     evidence_by_claim: dict = {}
     for ev in evidence:
         evidence_by_claim.setdefault(str(ev.claim_id), []).append(ev)
@@ -70,10 +83,17 @@ async def draft_verdicts(
     verdicts: list[VerdictResult] = []
     for claim in claims:
         ev_items = evidence_by_claim.get(str(claim.id), [])
-        evidence_text = "\n".join(
-            f"- [{ev.title or 'Source'}]({ev.source_url}): {ev.snippet}"
-            for ev in ev_items
-        ) or "No evidence retrieved."
+
+        # Format evidence with doc_ids for citation
+        evidence_lines = []
+        for i, ev in enumerate(ev_items):
+            doc_id = i + 1
+            source = ev.title or ev.domain or "Source"
+            quote = f' Quote: "{ev.quote_text}"' if ev.quote_text else ""
+            evidence_lines.append(
+                f"[doc_{doc_id}] [{source}]({ev.source_url}): {ev.snippet}{quote}"
+            )
+        evidence_text = "\n".join(evidence_lines) or "No evidence retrieved."
 
         messages = [
             SystemMessage(content=system_prompt),
@@ -87,13 +107,23 @@ async def draft_verdicts(
 
         try:
             response = llm.invoke(messages)
-            # Strip markdown code fences if present
-            content = response.content.strip()
-            if content.startswith("```"):
-                content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            data: dict = json.loads(content)
+            data = _extract_json(response.content)
+
             verdict_label = Verdict(data.get("verdict", "unverifiable"))
             confidence = float(data.get("confidence", 0.0))
+
+            # Parse citations from LLM response
+            citations = []
+            for cite_data in data.get("citations", []):
+                try:
+                    citations.append(Citation(
+                        evidence_id=UUID(cite_data.get("evidence_id", "")),
+                        quote=cite_data.get("quote", ""),
+                        claim_fragment=cite_data.get("claim_fragment", ""),
+                    ))
+                except Exception as exc:
+                    log.warning("[verdict_agent] Failed to parse citation: %s", exc)
+
             verdicts.append(
                 VerdictResult(
                     claim_id=claim.id,
@@ -101,6 +131,7 @@ async def draft_verdicts(
                     explanation=data.get("explanation", ""),
                     confidence=confidence,
                     evidence_ids=[ev.id for ev in ev_items],
+                    citations=citations,
                     requires_human_review=(
                         data.get("requires_human_review", False)
                         or confidence < LOW_CONFIDENCE_THRESHOLD
@@ -119,6 +150,7 @@ async def draft_verdicts(
                     explanation="Verdict generation failed due to an internal error.",
                     confidence=0.0,
                     evidence_ids=[],
+                    citations=[],
                     requires_human_review=True,
                 )
             )

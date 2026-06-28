@@ -26,7 +26,7 @@ import re
 from typing import List, Tuple
 from uuid import UUID
 
-from ..config import settings
+from ..config import get_settings
 from ..models import IngestSource, TranscriptSegment
 
 log = logging.getLogger(__name__)

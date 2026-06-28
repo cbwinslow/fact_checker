@@ -30,6 +30,7 @@ from ..models import (
     ManipulationRisk,
 )
 from ..services.vision import image_to_data_url, read_image_metadata
+from ..services.yolo_detector import get_yolo_detector, YOLODetector, FrameDetections
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +101,21 @@ async def analyse_images(
         if frame_sec is not None:
             metadata.frame_timestamp_sec = frame_sec
 
-        # --- Step 2: Encode image as data URL ---
+        # --- Step 2: Local YOLO object detection (optional, fast, local) ---
+        yolo_context = ""
+        try:
+            yolo_detector = get_yolo_detector()
+            frame_detections = await yolo_detector.detect_frames(
+                [image_path],
+                [frame_sec] if frame_sec is not None else None,
+            )
+            if frame_detections:
+                yolo_context = yolo_detector.to_vision_llm_context(frame_detections)
+                log.debug(f"[image_analyst] YOLO detected objects for {image_path.name}")
+        except Exception as exc:
+            log.warning(f"[image_analyst] YOLO detection failed (continuing without): {exc}")
+
+        # --- Step 3: Encode image as data URL ---
         try:
             data_url = image_to_data_url(image_path, max_side=1024)
         except Exception as exc:
@@ -126,6 +141,7 @@ async def analyse_images(
                             + (f"Date taken: {metadata.datetime_original}\n" if metadata.datetime_original else "")
                             + (f"Software: {metadata.software}\n" if metadata.software else "")
                             + (f"Frame at: {frame_sec:.1f}s\n" if frame_sec is not None else "")
+                            + (f"\n{yolo_context}\n" if yolo_context else "")
                             + "\nPlease analyse this image:"
                         ),
                     },

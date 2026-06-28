@@ -26,11 +26,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from typing import List, Optional
+from typing import List
 from uuid import UUID, uuid4
 
 from ..models import EmbeddedChunk, TranscriptSegment
-from ..config import settings
+from ..config import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -218,7 +218,8 @@ async def _embed_texts(texts: List[str]) -> List[List[float]]:
     Returns:
         List of float vectors, one per input string.
     """
-    if settings.openrouter_api_key.strip() and _OPENAI_AVAILABLE:
+    s = get_settings()
+    if s.openrouter_api_key.strip() and _OPENAI_AVAILABLE:
         try:
             return await _embed_openai(texts)
         except Exception as exc:
@@ -244,11 +245,12 @@ async def _embed_openai(texts: List[str]) -> List[List[float]]:
         List of float vectors from the API response.
     """
     import asyncio
+    s = get_settings()
     client = _OpenAIClient(
-        api_key=settings.openrouter_api_key,
-        base_url=settings.openrouter_base_url,
+        api_key=s.openrouter_api_key,
+        base_url=s.openrouter_base_url,
     )
-    model = getattr(settings, "embedding_model", "text-embedding-3-small")
+    model = getattr(s, "embedding_model", "text-embedding-3-small")
 
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
@@ -271,7 +273,8 @@ def _embed_sentence_transformers(texts: List[str]) -> List[List[float]]:
     Returns:
         List of float vectors.
     """
-    model_name = getattr(settings, "st_model_name", "all-MiniLM-L6-v2")
+    s = get_settings()
+    model_name = getattr(s, "st_model_name", "all-MiniLM-L6-v2")
     if model_name not in _st_model_cache:
         log.info("[embedder] Loading sentence-transformer model: %s", model_name)
         _st_model_cache[model_name] = _ST(model_name)

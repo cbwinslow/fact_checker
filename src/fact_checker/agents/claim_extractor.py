@@ -38,20 +38,42 @@ def _build_llm() -> BaseChatModel:
 async def extract_claims(
     job_id: UUID,
     segments: list[TranscriptSegment],
+    user_context: Optional[str] = None,
+    user_question: Optional[str] = None,
+    focus_areas: Optional[List[str]] = None,
 ) -> list[Claim]:
-    """Extract checkable claims from transcript segments."""
+    """Extract checkable claims from transcript segments.
+
+    Args:
+        job_id: UUID of the pipeline job.
+        segments: Transcript segments with timestamps.
+        user_context: Optional background info from user.
+        user_question: Optional specific question from user.
+        focus_areas: Optional list of topics to prioritize.
+    """
     if not segments:
         return []
 
     llm = _build_llm()
     system_prompt = _load_prompt()
+    
+    # Build context string from user inputs
+    context_parts = []
+    if user_context:
+        context_parts.append(f"USER CONTEXT: {user_context}")
+    if user_question:
+        context_parts.append(f"USER QUESTION: {user_question}")
+    if focus_areas:
+        context_parts.append(f"FOCUS AREAS: {', '.join(focus_areas)}")
+    context_str = "\n".join(context_parts) if context_parts else ""
+
     full_text = "\n".join(
         f"[{s.start_sec:.1f}s - {s.end_sec:.1f}s] {s.text}" for s in segments
     )
 
     messages = [
         SystemMessage(content=system_prompt),
-        HumanMessage(content=f"TRANSCRIPT:\n{full_text}"),
+        HumanMessage(content=f"CONTEXT:\n{context_str}\n\nTRANSCRIPT:\n{full_text}"),
     ]
 
     try:
