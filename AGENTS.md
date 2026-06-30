@@ -1,212 +1,108 @@
-# AGENTS.md — Agent Architecture & Pipeline Specification
-
-> **Purpose**: Single source of truth for the fact_checker agent pipeline. Describes every agent, its inputs/outputs, model assignments, and how they compose into the end-to-end harness.
-
+---
+name: fact-checker-agent-architecture
+version: 1
+summary: Canonical agent registry and handoff contract for the fact_checker pipeline.
+owners:
+  - cbwinslow
+repo: fact_checker
+entrypoints:
+  - src/factchecker/harness.py
+  - src/factchecker/api.py
+  - mcp/factcheckermcpserver.py
 ---
 
-## 1. Pipeline Overview
+# AGENTS.md
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         FACT_CHECKER PIPELINE (6 Stages)                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  Stage 1: INGEST ──► Stage 2: ANALYZE_IMAGES ──► Stage 3: EMBED          │
-│       │                    │                       │                       │
-│       ▼                    ▼                       ▼                       │
-│  MediaRouter          ImageAnalystAgent        Embedder + VectorStore     │
-│  (file_router.py)     (image_analyst.py)       (embedder.py, vector_store)│
-│       │                    │                       │                       │
-│       └────────────────────┴───────────────────────┘                       │
-│                                 │                                           │
-│                                 ▼                                           │
-│  Stage 4: EXTRACT_CLAIMS ──► Stage 5: DEEP_RESEARCH ──► Stage 6: VERDICT  │
-│       │                    │                       │                       │
-│       ▼                    ▼                       ▼                       │
-│  ClaimExtractorAgent  DeepResearchAgent       VerdictDraftAgent           │
-│  (claim_extractor.py) (deep_research_agent.py) (verdict_agent.py)         │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+## Purpose
+This file is the canonical registry for the fact_checker pipeline. It defines each agent, its responsibilities, inputs, outputs, tool dependencies, and handoff contract.
 
-**Shared Context**: All stages read/write a single `AnalysisContext` packet (defined in `models.py`) that carries:
-- `segments` — TranscriptSegment[]
-- `images` — ImageAnalysis[]
-- `chunks` — EmbeddedChunk[] + live `vector_store`
-- `claims` — Claim[]
-- `research_results` — ResearchResult[]
-- `evidence` — EvidenceItem[]
-- `verdicts` — VerdictResult[]
+## Pipeline order
+1. MediaRouter
+2. ImageAnalystAgent
+3. Embedder
+4. ClaimExtractorAgent
+5. DeepResearchAgent
+6. VerdictDraftAgent
+7. Orchestrator / Harness
 
----
+## Shared context
+All stages read from and write to a shared `AnalysisContext`. Cross-stage identity keys should remain UUID based: `jobid`, `claimid`, `imageid`, and `segmentid`.
 
-## 2. Agent Registry
+## Agent registry
 
-| Agent | File | Task Slot | Model (Default) | Purpose |
-|-------|------|-----------|-----------------|---------|
-| **MediaRouter** | `services/file_router.py` | N/A (router) | — | Detects input type, routes to correct ingestor |
-| **IngestService** | `services/ingest.py` | `multimodal` | `meta-llama/llama-4-maverick:free` | 3-layer transcript: yt-dlp → yt-transcript-api → Whisper |
-| **AudioIngest** | `services/audio_ingest.py` | `multimodal` | `meta-llama/llama-4-maverick:free` | Audio-only Whisper ASR |
-| **PDFIngest** | `services/pdf_ingest.py` | `fast` | `openai/gpt-oss-20b:free` | PDF text extraction |
-| **WebScraper** | `services/web_scraper.py` | `fast` | `openai/gpt-oss-20b:free` | Article scraping + html_to_text |
-| **ImageAnalystAgent** | `agents/image_analyst.py` | `multimodal` | `meta-llama/llama-4-maverick:free` | Vision analysis: objects, OCR, visible claims, manipulation risk |
-| **Embedder** | `services/embedder.py` | `extraction` | `openai/gpt-oss-120b:free` | Text → vector embeddings for semantic retrieval |
-| **ClaimExtractorAgent** | `agents/claim_extractor.py` | `extraction` | `openai/gpt-oss-120b:free` | Extract atomic checkable claims from transcript + image visible_claims |
-| **DeepResearchAgent** | `agents/deep_research_agent.py` | `verification` | `nvidia/nemotron-3-ultra-253b:free` | Multi-hop research: semantic retrieval, Google FC, Serper, scraping, adversarial, Wikipedia |
-| **EvidenceAgent** | `agents/evidence_agent.py` | `verification` | `nvidia/nemotron-3-ultra-253b:free` | Simpler evidence retrieval (Google FC + Serper only) |
-| **VerdictDraftAgent** | `agents/verdict_agent.py` | `verification` | `nvidia/nemotron-3-ultra-253b:free` | Evidence-grounded verdict per claim |
-| **Orchestrator** | `harness.py` | `orchestration` | `nvidia/nemotron-3-super-49b-v1:free` | Pipeline coordination, status updates, final summary |
+### MediaRouter
+- Module: `src/factchecker/services/filerouter.py`
+- Purpose: Detect input type and route to the correct ingest path.
+- Inputs: `jobid`, `url`, `localpath`, `imagepaths`, `sourcetype`
+- Outputs: transcript segments, ingest source classification, image-only routing state
+- Depends on: ingest service, audio ingest, pdf ingest, web scraper
+- Handoff: populated `ctx.segments`, `ctx.ingestsource`
 
----
+### ImageAnalystAgent
+- Module: `src/factchecker/agents/imageanalyst.py`
+- Purpose: Extract OCR text, visible claims, objects, and manipulation signals from uploaded images or frames.
+- Inputs: `jobid`, `imagepaths`, optional frame timestamps
+- Outputs: `ImageAnalysis[]`
+- Depends on: `services/vision.py`, multimodal model slot, `prompts/imageanalysis.md`
+- Handoff: populated `ctx.images`
 
-## 3. Stage Specifications
+### Embedder
+- Module: `src/factchecker/services/embedder.py`
+- Purpose: Chunk transcript content and create embeddings for semantic retrieval.
+- Inputs: `jobid`, `ctx.segments`
+- Outputs: embedded chunks, job vector store
+- Depends on: vector store, extraction model slot
+- Handoff: populated `ctx.chunks`, `ctx.vectorstore`
 
-### Stage 1: INGEST (`MediaRouter.route()`)
-**Input**: `job_id`, `url?`, `local_path?`, `image_paths?`
-**Output**: `(List[TranscriptSegment], IngestSource)`
-**Context updates**: `ctx.segments`, `ctx.ingest_source`
+### ClaimExtractorAgent
+- Module: `src/factchecker/agents/claimextractor.py`
+- Purpose: Convert transcript and image-derived text into atomic, checkable claims.
+- Inputs: `ctx.segments`, `ctx.images`
+- Outputs: `Claim[]`
+- Depends on: `prompts/claimextraction.md`, claim skills, extraction model slot
+- Handoff: populated `ctx.claims`
 
-Routes based on input:
-- YouTube URL → `services.ingest.ingest()` (3-layer)
-- Direct video/audio URL → download + Whisper
-- Local video → `services.ingest.ingest(local_path=...)`
-- Local audio → `services.audio_ingest.ingest_audio_file()`
-- PDF (local/URL) → `services.pdf_ingest.ingest_pdf()`
-- Web article → `services.web_scraper.scrape_article()`
-- Text/MD/DOCX/HTML → `_text_to_segments()`
-- Image-only → returns empty segments, `IngestSource.IMAGE`
+### DeepResearchAgent
+- Module: `src/factchecker/agents/deepresearchagent.py`
+- Purpose: Gather, score, and deduplicate supporting and contradicting evidence for each claim.
+- Inputs: `ctx.claims`, `ctx.vectorstore`
+- Outputs: `ResearchResult[]`, flattened evidence items
+- Depends on: search providers, web scraper, research skills, evidence skills, verification model slot
+- Handoff: populated `ctx.researchresults`, `ctx.evidence`
 
-### Stage 2: ANALYZE_IMAGES (`ImageAnalystAgent.analyse_images()`)
-**Input**: `job_id`, `image_paths[]`, `source_type`, `frame_timestamps?`
-**Output**: `List[ImageAnalysis]`
-**Context updates**: `ctx.images`
+### EvidenceAgent
+- Module: `src/factchecker/agents/evidenceagent.py`
+- Purpose: Provide a simpler evidence retrieval path when deep research is not needed.
+- Inputs: claims or ad hoc evidence retrieval requests
+- Outputs: evidence snippets and ranked sources
+- Depends on: Google Fact Check, Serper, evidence skills
+- Handoff: optional alternate evidence pipeline
 
-For each image:
-1. Extract EXIF metadata (`vision.read_image_metadata`)
-2. Encode as base64 data URL (`vision.image_to_data_url`)
-3. Call vision LLM with structured prompt (`prompts/image_analysis.md`)
-4. Parse JSON → `ImageAnalysis` with:
-   - `description`, `objects[]`, `text_in_image`, `visible_claims[]`
-   - `manipulation_risk`, `manipulation_reason`, `context_notes`
+### VerdictDraftAgent
+- Module: `src/factchecker/agents/verdictagent.py`
+- Purpose: Turn gathered evidence into evidence-grounded claim verdicts with calibrated confidence.
+- Inputs: `ctx.claims`, claim-grouped evidence
+- Outputs: `VerdictResult[]`
+- Depends on: `prompts/verdictdraft.md`, verdict skills, verification model slot
+- Handoff: populated `ctx.verdicts`
 
-### Stage 3: EMBED (`embedder.embed_segments()` + `VectorStore`)
-**Input**: `job_id`, `ctx.segments`
-**Output**: `List[EmbeddedChunk]`, live `VectorStore`
-**Context updates**: `ctx.chunks`, `ctx.vector_store`
+### Orchestrator / Harness
+- Module: `src/factchecker/harness.py`
+- Purpose: Execute the sequential pipeline, manage status transitions, and preserve partial results.
+- Inputs: job submission payloads from CLI, API, or MCP
+- Outputs: completed pipeline state, persisted job artifacts, final summary
+- Depends on: all stages, DB persistence, webhook notifier
+- Handoff: API / CLI / MCP response surfaces
 
-- Chunks transcript segments (overlap-aware)
-- Embeds via `extraction` task model
-- Stores in per-job ChromaDB collection
+## Invariants
+- `AnalysisContext` is the single source of truth.
+- Stages should be idempotent when possible.
+- Partial results should survive failures.
+- Status updates should be emitted between stages.
+- Image-only inputs should still support claim generation through visible-claim promotion.
 
-### Stage 4: EXTRACT_CLAIMS (`ClaimExtractorAgent.extract_claims()`)
-**Input**: `job_id`, `ctx.segments`
-**Output**: `List[Claim]`
-**Context updates**: `ctx.claims` (transcript claims + promoted `visible_claims` from images)
-
-- Builds full transcript text with timestamps
-- Calls `extraction` model with `prompts/claim_extraction.md`
-- Parses JSON array → `Claim` objects
-- Promotes `ImageAnalysis.visible_claims` as Claims with `image_id` link
-
-### Stage 5: DEEP_RESEARCH (`DeepResearchAgent.deep_research()`)
-**Input**: `claims[]`, `ctx` (with vector_store)
-**Output**: `List[ResearchResult]`
-**Context updates**: `ctx.research_results`, `ctx.evidence` (flattened)
-
-Per claim (concurrent, semaphore-limited):
-1. **Semantic retrieval** — embed claim, query job VectorStore
-2. **Google Fact Check API** — if key configured
-3. **Serper web search** — primary evidence
-4. **Full-page scrape** — top 3 URLs → enriched snippets
-5. **Adversarial counter-query** — if evidence weak (`_is_weak_evidence`)
-6. **Wikipedia lookup** — first named entity
-7. **Score & deduplicate** — credibility tiers + composite relevance
-
-### Stage 6: VERDICT (`VerdictDraftAgent.draft_verdicts()`)
-**Input**: `claims[]`, `ctx.evidence` (grouped by claim_id)
-**Output**: `List[VerdictResult]`
-**Context updates**: `ctx.verdicts`
-
-Per claim:
-- Formats evidence as cited snippets
-- Calls `verification` model with `prompts/verdict_draft.md`
-- Parses JSON → `VerdictResult` with calibrated confidence
-- Flags `requires_human_review` if confidence < 0.6 or sensitive topic
-
----
-
-## 4. Model Assignments (Config-Driven)
-
-All model selection is centralized in `config.py::MODEL_REGISTRY` and overrideable via `.env`:
-
-| Task Slot | Default Model | Purpose |
-|-----------|---------------|---------|
-| `extraction` | `openai/gpt-oss-120b:free` | Structured JSON claim extraction |
-| `verification` | `nvidia/nemotron-3-ultra-253b:free` | Deep reasoning, 1M context |
-| `orchestration` | `nvidia/nemotron-3-super-49b-v1:free` | Pipeline synthesis |
-| `multimodal` | `meta-llama/llama-4-maverick:free` | Vision (image_url content parts) |
-| `tooluse` | `cohere/north-mini-code:free` | Structured DB writes, JSON schema |
-| `fast` | `openai/gpt-oss-20b:free` | Quick subtasks, routing |
-
-**Offline Mode**: If `OPENROUTER_API_KEY` unset → `MockChatModel` returns deterministic stub JSON for full pipeline exercise.
-
----
-
-## 5. Data Flow Invariants
-
-1. **AnalysisContext is the single source of truth** — never pass raw lists between stages.
-2. **UUIDs are the only cross-stage keys** — `job_id`, `claim_id`, `image_id`, `segment_id`.
-3. **Stages are idempotent where possible** — re-running a stage with same context produces same output.
-4. **Errors are captured in context** — failed stages mark `job.status = FAILED` but preserve partial results.
-5. **DB status updates between stages** — enables real-time polling via `/jobs/{job_id}`.
-
----
-
-## 6. Adding a New Agent
-
-1. Create `src/fact_checker/agents/<name>.py` with async entry point.
-2. Add prompt to `src/fact_checker/prompts/<name>.md`.
-3. Register in `config.py::MODEL_REGISTRY` if new model slot needed.
-4. Add skill utilities to `src/fact_checker/skills/<domain>_skills.py` if reusable.
-5. Wire into `harness.py::run_pipeline()` at correct stage.
-6. Update `AnalysisContext` model if new artifact type introduced.
-7. Add tests in `tests/test_agents.py`.
-
----
-
-## 7. Key Integration Points
-
-| Component | Entry Point | Called By |
-|-----------|-------------|-----------|
-| CLI | `cli.py::app` | `fact-checker submit/file/serve/tui` |
-| API | `api.py::app` | `uvicorn fact_checker.api:app` |
-| MCP | `mcp/fact_checker_mcp_server.py` | `python -m mcp.fact_checker_mcp_server` |
-| Harness | `harness.py::run_pipeline()` | CLI, API, MCP, tests |
-| DB | `db.py::init_db()`, `save_pipeline_result()` | API, harness (with session) |
-
----
-
-## 8. Configuration Hierarchy
-
-```
-settings.py (BaseSettings)
-    ├─ .env file (highest priority)
-    ├─ Environment variables
-    ├─ config.py::MODEL_REGISTRY defaults
-    └─ Hardcoded fallbacks
-```
-
-Per-task model overrides: `MODEL_EXTRACTION`, `MODEL_VERIFICATION`, `MODEL_ORCHESTRATION`, `MODEL_MULTIMODAL`, `MODEL_TOOLUSE`, `MODEL_FAST`.
-
----
-
-## 9. Testing Strategy
-
-| Test File | Scope |
-|-----------|-------|
-| `tests/conftest.py` | Shared fixtures (mock segments, claims, evidence, FastAPI client) |
-| `tests/test_agents.py` | Unit tests for each agent (mocked LLMs) |
-| `tests/test_api.py` | API endpoint integration tests |
-| `tests/test_pipeline.py` | End-to-end harness tests (mocked externals) |
-
-Run: `pytest tests/ -v`
+## Gaps to close next
+- Remove or clearly deprecate duplicate root-level modules that mirror `src/factchecker`.
+- Consolidate `settings.py` and `config.py` into one configuration story.
+- Wire frame-to-transcript correlation into the harness.
+- Add per-agent SKILL.md files so humans and agent frameworks can consume each component consistently.

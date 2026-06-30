@@ -257,6 +257,17 @@ pytest --cov=src/fact_checker tests/
 - **FEATURES.md** — Feature catalog & implementation status
 - **IMPLEMENTATION_PLAN.md** — Detailed implementation plan
 
+### Documentation map
+- [Agent architecture](AGENTS.md)
+- [Ingest skill](skills/ingest/SKILL.md)
+- [Image analysis skill](skills/image-analysis/SKILL.md)
+- [Claim extraction skill](skills/claim-extraction/SKILL.md)
+- [Evidence retrieval skill](skills/evidence-retrieval/SKILL.md)
+- [Deep research skill](skills/deep-research/SKILL.md)
+- [Verdict skill](skills/verdict/SKILL.md)
+- [MCP server skill](mcp/SKILL.md)
+- [MCP server config](mcp/servers.md)
+
 ## License
 
 MIT License - see LICENSE file for details.

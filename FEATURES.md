@@ -205,6 +205,8 @@
 |-----|--------|----------|
 | README | ✅ | `README.md` |
 | Agent Architecture | ✅ | `AGENTS.md` |
+| Skills contracts | ✅ | `skills/*/SKILL.md` (6 files) |
+| MCP contracts | ✅ | `mcp/SKILL.md`, `mcp/servers.md` |
 | Software Requirements Spec | ✅ | `SRS.md` |
 | Feature Catalog (this file) | ✅ | `FEATURES.md` |
 | Prompts | ✅ | `src/fact_checker/prompts/*.md` (5 files) |
